@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rc-experiment-runner"
+version = "0.1.0"
+description = "Client-side A/B experiment runner for RevenueCat"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2",
+    "typer[all]",
+    "rich",
+]
+
+[project.scripts]
+rce = "rc_experiment_runner.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "ty",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
