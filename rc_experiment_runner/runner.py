@@ -10,14 +10,23 @@ from rc_experiment_runner.models import (
     ExperimentResults,
     Variant,
 )
+from rc_experiment_runner.rc_client import RCClient
 from rc_experiment_runner.store import ExperimentStore
+
+# Attribute name written to RC subscriber profile on assignment
+RC_EXPERIMENT_ATTR_PREFIX = "rce_experiment_"
 
 
 class ExperimentRunner:
     """High-level experiment runner that coordinates assignment, storage, and results."""
 
-    def __init__(self, db_path: str = "experiments.db") -> None:
+    def __init__(
+        self,
+        db_path: str = "experiments.db",
+        rc_client: RCClient | None = None,
+    ) -> None:
         self._store = ExperimentStore(db_path)
+        self._rc = rc_client
 
     def create_experiment(self, experiment: Experiment) -> None:
         """Create and persist a new experiment."""
@@ -52,6 +61,36 @@ class ExperimentRunner:
             assigned_at=datetime.now(UTC),
         )
         self._store.record_assignment(assignment)
+        return variant
+
+    async def assign_with_rc_sync(
+        self,
+        subscriber_id: str,
+        experiment_id: str,
+        offering_map: dict[str, str] | None = None,
+    ) -> Variant:
+        """Assign a subscriber and sync the assignment to RevenueCat.
+
+        After assignment, writes two RC subscriber attributes:
+          - rce_experiment_{experiment_id} = variant_id
+          - rce_variant_{experiment_id} = variant_id  (alias for easy segmentation)
+
+        If offering_map is provided (variant_id → offering_id), also overrides
+        the subscriber's active RC offering to match their assigned variant.
+
+        Requires a configured RCClient. Falls back to local-only assignment if
+        RC is not configured (no exception raised).
+        """
+        variant = self.assign(subscriber_id, experiment_id)
+
+        if self._rc is not None:
+            attr_key = f"{RC_EXPERIMENT_ATTR_PREFIX}{experiment_id}"
+            await self._rc.set_subscriber_attribute(subscriber_id, attr_key, variant.id)
+
+            if offering_map and variant.id in offering_map:
+                offering_id = offering_map[variant.id]
+                await self._rc.set_active_offering(subscriber_id, offering_id)
+
         return variant
 
     def record_conversion(
