@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rc-experiment-runner"
-version = "0.1.0"
+version = "0.2.0"
 description = "Client-side A/B experiment runner for RevenueCat"
 requires-python = ">=3.11"
 dependencies = [

@@ -69,3 +69,41 @@ class ExperimentResults(BaseModel):
     experiment_id: str
     total_subjects: int
     variant_stats: dict[str, VariantStats]
+
+
+class StatisticalResult(BaseModel):
+    """Statistical comparison between a control and a treatment variant."""
+
+    control_id: str
+    treatment_id: str
+    control_rate: float
+    treatment_rate: float
+    control_ci_lower: float
+    control_ci_upper: float
+    treatment_ci_lower: float
+    treatment_ci_upper: float
+    relative_uplift: float  # (treatment_rate - control_rate) / control_rate
+    z_score: float
+    p_value: float
+    confidence_level: float  # e.g. 0.95
+    is_significant: bool
+
+
+class WinnerResult(BaseModel):
+    """Winner detection result for an experiment."""
+
+    experiment_id: str
+    winner_id: str | None  # None if no significant winner yet
+    confidence_level: float
+    comparisons: list[StatisticalResult]
+
+
+class ExperimentReport(BaseModel):
+    """Full analysis report for an experiment."""
+
+    experiment_id: str
+    experiment_name: str
+    total_subjects: int
+    variant_stats: dict[str, VariantStats]
+    winner: WinnerResult
+    generated_at: datetime

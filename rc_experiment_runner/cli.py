@@ -5,8 +5,10 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
+from rc_experiment_runner.analysis import build_report, detect_winner, z_test_proportions
 from rc_experiment_runner.models import Experiment, Variant
 from rc_experiment_runner.runner import ExperimentRunner
 
@@ -168,6 +170,184 @@ def results(
 
     console.print(table)
     console.print(f"Total subjects: {res.total_subjects}")
+
+
+@app.command()
+def analyze(
+    experiment_id: str,
+    control: Annotated[str | None, typer.Option("--control", "-c", help="Control variant ID")] = (
+        None
+    ),
+    confidence: Annotated[float, typer.Option("--confidence", help="Confidence level (0-1)")] = (
+        0.95
+    ),
+    db_path: DbPathOption = "experiments.db",
+) -> None:
+    """Run statistical analysis comparing variants against the control.
+
+    For each non-control variant, runs a two-proportion z-test and prints
+    the z-score, p-value, confidence intervals, and whether the result is
+    statistically significant.
+    """
+    runner = _get_runner(db_path)
+    res = runner.results(experiment_id)
+    experiment = runner._store.get_experiment(experiment_id)
+    if experiment is None:
+        console.print(f"[red]Experiment '{experiment_id}' not found.[/red]")
+        raise typer.Exit(1)
+
+    # Resolve control
+    control_id = control or experiment.variants[0].id
+    if control_id not in res.variant_stats:
+        console.print(f"[red]Control variant '{control_id}' not found in results.[/red]")
+        raise typer.Exit(1)
+
+    control_stats = res.variant_stats[control_id]
+    alpha = 1.0 - confidence
+
+    table = Table(title=f"Statistical Analysis: {experiment_id}  (α={alpha:.2f})")
+    table.add_column("Comparison", style="cyan")
+    table.add_column("Control Rate", justify="right")
+    table.add_column("Treatment Rate", justify="right")
+    table.add_column("Uplift", justify="right")
+    table.add_column("95% CI (treatment)", justify="right")
+    table.add_column("Z-score", justify="right")
+    table.add_column("P-value", justify="right")
+    table.add_column("Significant?", justify="center")
+
+    any_results = False
+    for vid, stats in res.variant_stats.items():
+        if vid == control_id:
+            continue
+        any_results = True
+        result = z_test_proportions(
+            control_conversions=control_stats.conversions,
+            control_n=control_stats.assignments,
+            treatment_conversions=stats.conversions,
+            treatment_n=stats.assignments,
+            confidence_level=confidence,
+        )
+        result = result.model_copy(update={"control_id": control_id, "treatment_id": vid})
+
+        uplift_str = (
+            f"{result.relative_uplift:+.1%}"
+            if result.relative_uplift != float("inf")
+            else "∞"
+        )
+        sig_cell = "[green]✓ YES[/green]" if result.is_significant else "[yellow]✗ NO[/yellow]"
+        ci_str = f"[{result.treatment_ci_lower:.3f}, {result.treatment_ci_upper:.3f}]"
+
+        table.add_row(
+            f"{control_id} → {vid}",
+            f"{result.control_rate:.3f}",
+            f"{result.treatment_rate:.3f}",
+            uplift_str,
+            ci_str,
+            f"{result.z_score:.3f}",
+            f"{result.p_value:.4f}",
+            sig_cell,
+        )
+
+    if not any_results:
+        console.print("[yellow]Only one variant — nothing to compare.[/yellow]")
+        return
+
+    console.print(table)
+
+    # Winner summary
+    winner = detect_winner(res, experiment, control_id, confidence)
+    if winner.winner_id:
+        console.print(
+            f"\n🏆 [bold green]Winner: {winner.winner_id}[/bold green] "
+            f"(significant at {confidence:.0%} confidence)"
+        )
+    else:
+        console.print(
+            f"\n[yellow]No significant winner yet at {confidence:.0%} confidence.[/yellow]"
+        )
+
+
+@app.command()
+def report(
+    experiment_id: str,
+    control: Annotated[str | None, typer.Option("--control", "-c")] = None,
+    confidence: Annotated[float, typer.Option("--confidence")] = 0.95,
+    db_path: DbPathOption = "experiments.db",
+) -> None:
+    """Print a full experiment report: results + statistical analysis + winner."""
+    runner = _get_runner(db_path)
+    res = runner.results(experiment_id)
+    experiment = runner._store.get_experiment(experiment_id)
+    if experiment is None:
+        console.print(f"[red]Experiment '{experiment_id}' not found.[/red]")
+        raise typer.Exit(1)
+
+    rpt = build_report(res, experiment, control_id=control, confidence_level=confidence)
+
+    # Header
+    console.print(
+        Panel(
+            f"[bold]{rpt.experiment_name}[/bold]\n"
+            f"ID: {rpt.experiment_id}  |  "
+            f"Subjects: {rpt.total_subjects}  |  "
+            f"Generated: {rpt.generated_at.strftime('%Y-%m-%d %H:%M UTC')}",
+            title="Experiment Report",
+        )
+    )
+
+    # Results table
+    res_table = Table(title="Variant Results")
+    res_table.add_column("Variant", style="cyan")
+    res_table.add_column("Assignments", justify="right")
+    res_table.add_column("Conversions", justify="right")
+    res_table.add_column("Rate", justify="right")
+    res_table.add_column("Total Value", justify="right")
+    res_table.add_column("Avg Value", justify="right")
+
+    for vid, stats in rpt.variant_stats.items():
+        res_table.add_row(
+            vid,
+            str(stats.assignments),
+            str(stats.conversions),
+            f"{stats.conversion_rate:.3f}",
+            f"{stats.total_value:.2f}",
+            f"{stats.avg_value:.2f}",
+        )
+    console.print(res_table)
+
+    # Statistical comparisons
+    if rpt.winner.comparisons:
+        stat_table = Table(title=f"Statistical Comparisons (confidence={confidence:.0%})")
+        stat_table.add_column("Treatment", style="cyan")
+        stat_table.add_column("Uplift", justify="right")
+        stat_table.add_column("Z-score", justify="right")
+        stat_table.add_column("P-value", justify="right")
+        stat_table.add_column("Significant", justify="center")
+
+        for cmp in rpt.winner.comparisons:
+            uplift_str = (
+                f"{cmp.relative_uplift:+.1%}" if cmp.relative_uplift != float("inf") else "∞"
+            )
+            sig = "[green]✓[/green]" if cmp.is_significant else "[yellow]✗[/yellow]"
+            stat_table.add_row(
+                cmp.treatment_id,
+                uplift_str,
+                f"{cmp.z_score:.3f}",
+                f"{cmp.p_value:.4f}",
+                sig,
+            )
+        console.print(stat_table)
+
+    # Winner verdict
+    if rpt.winner.winner_id:
+        console.print(
+            f"\n🏆 [bold green]Winner: {rpt.winner.winner_id}[/bold green] "
+            f"(statistically significant at {confidence:.0%})"
+        )
+    else:
+        console.print(
+            f"\n[yellow]⏳ No significant winner yet at {confidence:.0%} confidence.[/yellow]"
+        )
 
 
 @app.command()
